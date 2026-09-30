@@ -1,0 +1,25 @@
+# NEXORA — en-têtes de sécurité (Netlify / Cloudflare Pages / compatible Hugo-Apache)
+# Hébergeur compatible : le fichier est lu automatiquement à la racine du site.
+# Hébergeur incompatible : le site reste fonctionnel, configurez ces en-têtes
+# depuis le panneau de votre hébergeur (voir SECURITY.md → « Déploiement »).
+# Vercel : voir vercel.json (mêmes valeurs). GitHub Pages : impossible de poser
+# des en-têtes, privilégiez Netlify, Cloudflare Pages ou Vercel.
+#
+# ── MODE STRIPE (optionnel) ───────────────────────────────────────────────────
+# Si vous activez `VITE_STRIPE_PUBLISHABLE_KEY`, ajoutez les directives suivantes
+# aux directives équivalentes ci-dessous (elles ne sont PAS actives tant que le
+# mode démo est en place, conformément au principe du moindre privilège) :
+#   script-src 'self' https://js.stripe.com
+#   frame-src   https://js.stripe.com https://hooks.stripe.com
+#   connect-src 'self' https://api.stripe.com
+#   img-src     'self' data: https://*.stripe.com
+
+/*
+  Content-Security-Policy: default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; script-src 'self'; connect-src 'self'; manifest-src 'self'; upgrade-insecure-requests
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  X-Frame-Options: DENY
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), usb=(), interest-cohort=()
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Resource-Policy: same-origin
+  Strict-Transport-Security: max-age=31536000; includeSubDomains

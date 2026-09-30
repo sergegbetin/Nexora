@@ -1,0 +1,76 @@
+# ============================================================
+# NEXORA — .gitignore (stack Node.js / Vite / React / TypeScript)
+# ============================================================
+
+# ── Secrets & environnement ──────────────────────────────────────────────────
+# Jamais de .env versionné. .gitignore fait foi : un fichier déjà suivi par Git
+# reste suivi, il faudrait alors `git rm --cached <fichier>`.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# ── Journalisation ───────────────────────────────────────────────────────────
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# ── Dépendances ──────────────────────────────────────────────────────────────
+node_modules/
+bower_components/
+jspm_packages/
+vendor/
+venv/
+.venv/
+env/
+ENV/
+__pycache__/
+*.pyc
+
+# ── Artefacts de build ───────────────────────────────────────────────────────
+dist/
+build/
+out/
+.ssr-build/
+.next/
+.nuxt/
+.svelte-kit/
+coverage/
+*.tsbuildinfo
+
+# ── Outils & caches ──────────────────────────────────────────────────────────
+.cache/
+.vite/
+.eslintcache
+.stylelintcache
+.turbo/
+.parcel-cache/
+.node_repl_history
+
+# ── Bases de données locales ─────────────────────────────────────────────────
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite-journal
+firebase-debug.log
+firestore-debug.log
+
+# ── Éditeurs / système ───────────────────────────────────────────────────────
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+*.swp
+*.swo
+Thumbs.db
+ehthumbs.db
+Desktop.ini

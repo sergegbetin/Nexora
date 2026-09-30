@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="fr">
+  <head><meta charset="utf-8" /><title>sonde : polices auto-hébergées</title></head>
+  <body>
+    <iframe id="f" src="/" style="width: 100%; height: 400px; border: 1px solid #333"></iframe>
+    <pre id="result">en attente…</pre>
+    <script>
+      const lines = [];
+      const finish = () => {
+        document.getElementById('result').textContent = lines.join('\n') || 'aucun résultat';
+      };
+      document.getElementById('f').addEventListener('load', async () => {
+        try {
+          const w = document.getElementById('f').contentWindow;
+          await w.document.fonts.ready;
+          lines.push('fonts.status = ' + w.document.fonts.status);
+          lines.push(
+            'chargées = ' +
+              [...w.document.fonts].filter((f) => f.status === 'loaded').length +
+              '/' +
+              w.document.fonts.size,
+          );
+          lines.push('Inter 400 dispo = ' + w.document.fonts.check('16px Inter'));
+          lines.push(
+            'Space Grotesk 700 dispo = ' + w.document.fonts.check('700 32px "Space Grotesk"'),
+          );
+          const h1 = w.document.querySelector('h1');
+          lines.push(
+            'police calculée (h1) = ' + (h1 ? w.getComputedStyle(h1).fontFamily : 'h1 introuvable'),
+          );
+        } catch (e) {
+          lines.push('ERREUR ' + e.message);
+        }
+        finish();
+      });
+      setTimeout(() => {
+        if (lines.length === 0) {
+          lines.push('TIMEOUT');
+          finish();
+        }
+      }, 8000);
+    </script>
+  </body>
+</html>

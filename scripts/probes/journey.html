@@ -1,0 +1,522 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <title>NEXORA — sonde de parcours</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        background: #080810;
+        color: #f0f0f8;
+        font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      #result {
+        margin: 0;
+        padding: 10px;
+        white-space: pre-wrap;
+      }
+      #app {
+        display: block;
+        border: 0;
+        width: 1280px;
+        height: 900px;
+        margin-top: 8px;
+      }
+    </style>
+  </head>
+  <body>
+    <pre id="result">PENDING</pre>
+    <iframe id="app" title="application NEXORA"></iframe>
+    <script>
+      /*
+       * Parcours utilisateur complet + états de l'interface, exécuté dans une
+       * seule iframe (navigation SPA réelle, historique réel, stockage réel) :
+       *
+       *   accueil → boutique → tri/filtres → favoris → fiche produit →
+       *   ajout panier → panier (promo, quantité) → checkout (validation,
+       *   3 étapes, paiement démo) → confirmation → rechargement → retour
+       *   arrière → états vides → recherche → menu mobile → newsletter → FAQ →
+       *   contact → effacement des données.
+       *
+       * Sortie : lignes « OK … » / « FAIL … » dans <pre id="result">.
+       */
+      (async () => {
+        const frame = document.getElementById('app');
+        const out = [];
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const win = () => frame.contentWindow;
+        const doc = () => frame.contentDocument;
+        const path = () => win().location.pathname + win().location.search;
+
+        const ok = (label, detail) => out.push(`OK ${label} — ${detail}`);
+        const fail = (label, detail) => out.push(`FAIL ${label} — ${detail}`);
+
+        const waitFor = async (predicate, timeout = 5000) => {
+          const start = Date.now();
+          while (Date.now() - start < timeout) {
+            try {
+              const value = predicate();
+              if (value) return value;
+            } catch {
+              /* document en cours de navigation */
+            }
+            await sleep(70);
+          }
+          return null;
+        };
+
+        const find = (selector, text) =>
+          Array.from(doc().querySelectorAll(selector)).find(
+            (el) => !text || (el.textContent || '').replace(/\s+/g, ' ').includes(text),
+          );
+
+        // `new win().Event(...)` serait lu comme `new (win())(...)` : on passe
+        // toujours par la classe de la fenêtre de l'iframe, parenthésée.
+        const fire = (target, type, init) =>
+          target.dispatchEvent(new (win().Event)(type, init));
+
+        const setValue = (el, value) => {
+          const proto =
+            el.tagName === 'TEXTAREA'
+              ? win().HTMLTextAreaElement.prototype
+              : win().HTMLInputElement.prototype;
+          Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, value);
+          fire(el, 'input', { bubbles: true });
+          fire(el, 'change', { bubbles: true });
+        };
+
+        /**
+         * Une navigation pleine page recharge le bundle : le HTML pré-rendu est
+         * immédiat, mais l'interactivité non. On attend que React possède
+         * réellement les nœuds avant toute interaction (sinon les clics tombent
+         * dans le vide pendant les ~3 s de montage à froid).
+         */
+        const reactReady = async (timeout = 12000) =>
+          waitFor(() => {
+            const root = doc().getElementById('root');
+            if (!root) return false;
+            return Array.from(root.querySelectorAll('*')).some((el) =>
+              Object.keys(el).some((k) => k.startsWith('__react')),
+            );
+          }, timeout);
+
+        const navigate = async (url, waitPath) => {
+          win().location.href = url;
+          const reached = await waitFor(() => path().startsWith(waitPath), 6000);
+          await sleep(300);
+          const interactive = await reactReady();
+          await sleep(400);
+          return Boolean(reached) && interactive;
+        };
+
+        const step = async (label, fn) => {
+          try {
+            await fn();
+          } catch (error) {
+            fail(label, `exception ${error && error.message ? error.message : error}`);
+          }
+        };
+
+        const fill = (autocomplete, value) => {
+          const input = find(`input[autocomplete="${autocomplete}"]`);
+          if (!input) throw new Error(`champ ${autocomplete} introuvable`);
+          setValue(input, value);
+        };
+
+        const clickButton = (text) => {
+          const button = find('button', text);
+          if (!button) throw new Error(`bouton « ${text} » introuvable`);
+          button.click();
+        };
+
+        await step('chargement', async () => {
+          frame.src = '/';
+          const ready = await waitFor(() => doc().querySelector('h1'), 8000);
+          if (!ready) throw new Error('accueil non rendu');
+          await sleep(300);
+          if (!(await reactReady())) throw new Error('interactivité non montée (React absent)');
+          await sleep(400);
+          ok('chargement', `h1 « ${ready.textContent.trim().slice(0, 40)} » + React actif`);
+        });
+
+        await step('structure accueil', async () => {
+          const header = doc().querySelector('header.site-header');
+          const footer = doc().querySelector('footer');
+          const nav = doc().querySelectorAll('nav a').length;
+          if (!header || !footer) throw new Error('header/footer manquant');
+          if (nav < 3) throw new Error(`navigation trop pauvre (${nav} liens)`);
+          ok('structure accueil', `header + footer + ${nav} liens de navigation`);
+        });
+
+        await step('newsletter invalide', async () => {
+          const input = doc().querySelector('#newsletter-email');
+          if (!input) throw new Error('champ newsletter introuvable');
+          const readError = () =>
+            Array.from(doc().querySelectorAll('.form-error, .newsletter-success')).find((el) =>
+              /valide/i.test(el.textContent),
+            ) || null;
+          const submit = input.form && input.form.querySelector('button[type="submit"]');
+          if (!submit) throw new Error('bouton d’inscription introuvable');
+
+          setValue(input, 'pas-un-email');
+          fire(input.form, 'submit', { bubbles: true, cancelable: true });
+          let error = await waitFor(readError, 2500);
+          if (!error) {
+            // Repli : clic réel sur le bouton (chemin utilisateur).
+            submit.click();
+            error = await waitFor(readError, 3000);
+          }
+          if (!error) {
+            const shown = doc().querySelector('.form-error, .newsletter-success');
+            throw new Error(
+              shown
+                ? `message inattendu : « ${shown.textContent.trim().slice(0, 60)} »`
+                : 'aucun message affiché pour un email invalide',
+            );
+          }
+          ok('newsletter invalide', 'message d’erreur accessible affiché');
+          setValue(input, 'client@exemple.fr');
+          fire(input.form, 'submit', { bubbles: true, cancelable: true });
+          const sent = await waitFor(() => doc().querySelector('.newsletter-success'), 3000);
+          if (!sent) {
+            const again = doc().querySelector('button[type="submit"]');
+            if (again) again.click();
+          }
+          const confirmed = await waitFor(() => doc().querySelector('.newsletter-success'), 3000);
+          if (!confirmed) throw new Error('confirmation absente pour un email valide');
+          ok('newsletter valide', confirmed.textContent.trim().slice(0, 50));
+        });
+
+        await step('navigation boutique', async () => {
+          const link = find('a[href="/boutique"]');
+          if (!link) throw new Error('lien Boutique introuvable');
+          link.click();
+          const reached = await waitFor(() => path().startsWith('/boutique'), 5000);
+          if (!reached) throw new Error('navigation vers /boutique impossible');
+          await sleep(500);
+          const cards = doc().querySelectorAll('a[href^="/produit/"]').length;
+          if (cards < 16) throw new Error(`catalogue incomplet : ${cards} fiches`);
+          ok('navigation boutique', `${cards} fiches produit`);
+        });
+
+        await step('tri et filtres', async () => {
+          const select = doc().querySelector('select');
+          if (!select) throw new Error('sélecteur de tri introuvable');
+          const initialIndex = select.selectedIndex;
+          const before = Array.from(doc().querySelectorAll('a[href^="/produit/"]'))
+            .slice(0, 3)
+            .map((a) => a.getAttribute('href'))
+            .join(',');
+          if (select.options.length < 2) throw new Error('moins de deux options de tri');
+          select.selectedIndex = select.options.length - 1;
+          fire(select, 'change', { bubbles: true });
+          await sleep(500);
+          const cards = doc().querySelectorAll('a[href^="/produit/"]').length;
+          if (cards < 1) throw new Error('le tri a vidé le catalogue');
+          ok('tri et filtres', `${select.options.length} options, ${cards} fiches après tri`);
+          // Remet l'ordre par défaut pour la suite.
+          select.selectedIndex = initialIndex;
+          fire(select, 'change', { bubbles: true });
+          await sleep(300);
+          const restored = Array.from(doc().querySelectorAll('a[href^="/produit/"]'))
+            .slice(0, 3)
+            .map((a) => a.getAttribute('href'))
+            .join(',');
+          if (restored !== before) fail('tri et filtres', 'le tri initial n’a pas été restauré');
+        });
+
+        await step('favoris', async () => {
+          const button = doc().querySelector('.wishlist-button');
+          if (!button) throw new Error('bouton favori introuvable');
+          const before = button.getAttribute('aria-pressed');
+          button.click();
+          const pressed = await waitFor(
+            () => doc().querySelector('.wishlist-button')?.getAttribute('aria-pressed') !== before,
+            3000,
+          );
+          if (!pressed) throw new Error('état favori non mis à jour');
+          const stored = await waitFor(() => win().localStorage.getItem('nexora_wishlist'), 3000);
+          if (!stored) throw new Error('favoris non persistés');
+          ok('favoris', 'bascule aria-pressed + stockage local renseigné');
+        });
+
+        await step('aperçu rapide', async () => {
+          const button = find('button', 'Aperçu rapide');
+          if (!button) throw new Error('bouton aperçu rapide introuvable');
+          button.click();
+          const dialog = await waitFor(
+            () => doc().querySelector('[role="dialog"], .quickview, .modal, .quick-view-panel'),
+            3000,
+          );
+          if (!dialog) throw new Error('aperçu rapide non affiché');
+          const escape = new (win().KeyboardEvent)('keydown', {
+            key: 'Escape',
+            bubbles: true,
+          });
+          doc().dispatchEvent(escape);
+          await sleep(400);
+          ok('aperçu rapide', 'ouverture puis fermeture par Échap');
+        });
+
+        await step('fiche produit', async () => {
+          const link = doc().querySelector('a[href^="/produit/"]');
+          if (!link) throw new Error('lien produit introuvable');
+          link.click();
+          const reached = await waitFor(() => path().startsWith('/produit/'), 5000);
+          if (!reached) throw new Error('ouverture de la fiche impossible');
+          await sleep(500);
+          const h1 = doc().querySelector('h1');
+          const buy = find('button', 'Ajouter au panier');
+          if (!h1 || !buy) throw new Error('h1 ou bouton d’achat absent');
+          ok('fiche produit', `« ${h1.textContent.trim().slice(0, 40)} » + CTA d’achat`);
+        });
+
+        await step('ajout au panier', async () => {
+          clickButton('Ajouter au panier');
+          const cart = await waitFor(() => win().localStorage.getItem('nexora_cart'), 4000);
+          const badge = await waitFor(() => doc().querySelector('button[aria-label^="Panier"]'), 3000);
+          if (!cart) throw new Error('panier non persisté');
+          if (!badge || !/\(\s*[1-9]/.test(badge.getAttribute('aria-label'))) {
+            throw new Error('compteur de panier non mis à jour');
+          }
+          ok('ajout au panier', badge.getAttribute('aria-label'));
+        });
+
+        await step('panier', async () => {
+          const cartButton = doc().querySelector('button[aria-label^="Panier"]');
+          cartButton.click();
+          const reached = await waitFor(() => path().startsWith('/panier'), 5000);
+          if (!reached) throw new Error('ouverture du panier impossible');
+          await sleep(500);
+          const product = doc().querySelector('.summary-product, .cart-item, li');
+          if (!product) throw new Error('article absent du panier');
+          ok('panier', 'article, sous-total et total affichés');
+        });
+
+        await step('code promo', async () => {
+          const input = doc().querySelector('input[placeholder="Ex. NEXORA10"]');
+          if (!input) throw new Error('champ promo introuvable');
+          setValue(input, 'NEXORA10');
+          fire(input.form, 'submit', { bubbles: true, cancelable: true });
+          const discount = await waitFor(() => doc().querySelector('.summary-discount'), 3000);
+          if (!discount) throw new Error('remise non appliquée');
+          const promo = await waitFor(() => win().localStorage.getItem('nexora_promo'), 3000);
+          // La valeur est sérialisée en JSON par le store.
+          if (JSON.parse(promo || '""') !== 'NEXORA10') {
+            throw new Error(`code promo non persisté (${promo})`);
+          }
+          ok('code promo', `remise ${discount.textContent.replace(/\s+/g, ' ').trim().slice(0, 40)}`);
+        });
+
+        await step('quantité', async () => {
+          const control = find('button', '+');
+          if (!control) throw new Error('contrôle de quantité introuvable');
+          const totalBefore = doc().querySelector('.summary-total strong')?.textContent;
+          control.click();
+          await sleep(500);
+          const totalAfter = doc().querySelector('.summary-total strong')?.textContent;
+          if (totalBefore === totalAfter) throw new Error('total inchangé après +1');
+          const minus = find('button', '−');
+          if (minus) {
+            minus.click();
+            await sleep(400);
+          }
+          ok('quantité', `total ${totalBefore} → ${totalAfter}`);
+        });
+
+        await step('étape checkout 1', async () => {
+          clickButton('Passer au paiement');
+          const reached = await waitFor(() => path().startsWith('/checkout'), 5000);
+          if (!reached) throw new Error('accès au checkout impossible');
+          await sleep(500);
+
+          // Validation : aucun champ renseigné → messages d'erreur.
+          clickButton('Continuer');
+          const error = await waitFor(() => doc().querySelector('.form-error'), 3000);
+          if (!error) throw new Error('aucune erreur affichée sur formulaire vide');
+          ok('étape checkout 1', `validation : ${error.textContent.trim().slice(0, 45)}`);
+
+          fill('name', 'Camille Dupont');
+          fill('email', 'camille@exemple.fr');
+          fill('tel', '0612345678');
+          clickButton('Continuer');
+          const shipping = await waitFor(
+            () => doc().querySelector('input[autocomplete="street-address"]'),
+            4000,
+          );
+          if (!shipping) throw new Error('étape livraison non atteinte');
+        });
+
+        await step('étape checkout 2', async () => {
+          fill('street-address', '12 rue des Prés');
+          fill('address-level2', 'Lyon');
+          fill('postal-code', '69003');
+          fill('country-name', 'France');
+          clickButton('Continuer');
+          const payment = await waitFor(
+            () => doc().querySelector('.payment-demo') || doc().querySelector('[id="nexora-payment-element"]'),
+            4000,
+          );
+          if (!payment) throw new Error('étape paiement non atteinte');
+          ok('étape checkout 2', 'étape paiement atteinte');
+        });
+
+        await step('paiement démo', async () => {
+          const cardInput = doc().querySelector(
+            'input[placeholder*="4242"], input[autocomplete*="cc-"], input[name*="cvc" i]',
+          );
+          if (cardInput) throw new Error('champ bancaire présent côté frontend');
+          const notice = doc().querySelector('.payment-demo');
+          if (!notice || !/aucune transaction/i.test(notice.textContent)) {
+            throw new Error('panneau de démonstration absent ou illisible');
+          }
+          const payButton = find('button', 'Confirmer la commande');
+          if (!payButton) throw new Error('bouton de commande introuvable');
+          payButton.click();
+          const reached = await waitFor(() => path().startsWith('/confirmation'), 6000);
+          if (!reached) throw new Error('redirection vers la confirmation impossible');
+          await sleep(600);
+          const order = await waitFor(() => win().localStorage.getItem('nexora_order'), 4000);
+          if (!order) throw new Error('commande locale non enregistrée');
+          ok('paiement démo', `confirmation atteinte, commande ${JSON.parse(order).number}`);
+        });
+
+        await step('confirmation après rechargement', async () => {
+          frame.src = '/confirmation';
+          const heading = await waitFor(() => {
+            const el = doc().querySelector('h1');
+            return el && /confirm/i.test(el.textContent) ? el : null;
+          }, 8000);
+          if (!heading) throw new Error('commande perdue après rechargement');
+          ok('confirmation après rechargement', heading.textContent.trim().slice(0, 45));
+        });
+
+        await step('retour arrière', async () => {
+          win().history.back();
+          const reached = await waitFor(() => path().startsWith('/checkout'), 5000);
+          if (!reached) throw new Error(`le retour arrière ne mène pas au checkout (${path()})`);
+          ok('retour arrière', path());
+        });
+
+        await step('recherche', async () => {
+          if (!(await navigate('/recherche?q=casque', '/recherche'))) {
+            throw new Error('ouverture de la recherche impossible');
+          }
+          const results = doc().querySelectorAll('a[href^="/produit/"]').length;
+          if (results < 1) throw new Error('aucun résultat pour « casque »');
+          await navigate('/recherche?q=zzzzzqqq', '/recherche');
+          const empty = await waitFor(
+            () => /aucun résultat|pas de résultat|essayez/i.test(doc().body.textContent),
+            4000,
+          );
+          if (!empty) throw new Error('état « aucun résultat » absent');
+          ok('recherche', `${results} résultat(s) + état vide géré`);
+        });
+
+        await step('état panier vide', async () => {
+          win().localStorage.clear();
+          if (!(await navigate('/panier', '/panier'))) throw new Error('ouverture du panier impossible');
+          const empty = await waitFor(() => /panier est vide/i.test(doc().body.textContent), 5000);
+          if (!empty) throw new Error('état « panier vide » absent');
+          ok('état panier vide', 'message et CTA de repli affichés');
+        });
+
+        await step('état checkout sans article', async () => {
+          if (!(await navigate('/checkout', '/checkout'))) throw new Error('ouverture impossible');
+          const empty = await waitFor(() => /panier est vide/i.test(doc().body.textContent), 5000);
+          if (!empty) throw new Error('garde-fou checkout absent');
+          ok('état checkout sans article', 'redirigé vers le repli « panier vide »');
+        });
+
+        await step('FAQ', async () => {
+          if (!(await navigate('/faq', '/faq'))) throw new Error('ouverture de la FAQ impossible');
+          const items = doc().querySelectorAll('details').length;
+          if (items < 5) throw new Error(`FAQ incomplète (${items} questions)`);
+          const first = doc().querySelector('details');
+          first.open = true;
+          await sleep(200);
+          ok('FAQ', `${items} questions, première ouverte`);
+        });
+
+        await step('contact', async () => {
+          if (!(await navigate('/contact', '/contact'))) throw new Error('ouverture impossible');
+          const submit = find('button', 'Envoyer') || doc().querySelector('button[type="submit"]');
+          if (!submit) throw new Error('bouton d’envoi introuvable');
+          submit.click();
+          const error = await waitFor(() => doc().querySelector('.form-error'), 4000);
+          if (!error) throw new Error('aucune erreur sur formulaire vide');
+          ok('contact', 'validation accessible à la soumission');
+        });
+
+        await step('menu mobile', async () => {
+          frame.style.width = '390px';
+          await sleep(600);
+          const toggle = doc().querySelector('button.mobile-menu');
+          if (!toggle) throw new Error('bouton de menu introuvable');
+          if (toggle.getAttribute('aria-expanded') !== 'false') {
+            throw new Error('menu ouvert par défaut sur mobile');
+          }
+          toggle.click();
+          const opened = await waitFor(
+            () => doc().querySelector('.main-nav.is-open'),
+            3000,
+          );
+          if (!opened) throw new Error('menu mobile non ouvert');
+          if (doc().querySelector('button.mobile-menu').getAttribute('aria-expanded') !== 'true') {
+            throw new Error('aria-expanded non mis à jour');
+          }
+          doc().querySelector('button.mobile-menu').click();
+          const closed = await waitFor(() => !doc().querySelector('.main-nav.is-open'), 3000);
+          if (!closed) throw new Error('menu mobile non fermé');
+          frame.style.width = '1280px';
+          await sleep(300);
+          ok('menu mobile', 'ouverture/fermeture + aria-expanded cohérent');
+        });
+
+        await step('effacement des données', async () => {
+          // Formes valides : le store valide désormais les types, on veut quand
+          // même des clés réellement présentes avant effacement.
+          win().localStorage.setItem(
+            'nexora_cart',
+            JSON.stringify([{ product: { id: 'probe' }, quantity: 2 }]),
+          );
+          win().localStorage.setItem('nexora_wishlist', JSON.stringify(['probe-a', 'probe-b']));
+          if (!(await navigate('/compte', '/compte'))) throw new Error('ouverture du compte impossible');
+
+          // La carte « Données locales » n'existe qu'une fois connecté.
+          const password = await waitFor(() => doc().querySelector('input[type="password"]'), 5000);
+          if (password) {
+            setValue(doc().querySelector('input[type="email"]'), 'client@nexora.demo');
+            setValue(password, 'demo1234');
+            fire(password.form, 'submit', { bubbles: true, cancelable: true });
+            await sleep(800);
+          }
+
+          const trigger = await waitFor(
+            () => find('button', 'Effacer toutes mes données locales'),
+            5000,
+          );
+          if (!trigger) throw new Error('bouton d’effacement introuvable (connexion échouée ?)');
+          trigger.click();
+          const confirm = await waitFor(() => find('button', 'Confirmer'), 3000);
+          if (!confirm) throw new Error('confirmation en deux étapes absente');
+          confirm.click();
+          const emptied = await waitFor(
+            () => Object.keys(win().localStorage).length === 0,
+            4000,
+          );
+          if (!emptied) {
+            throw new Error(`stockage non vidé : ${Object.keys(win().localStorage).join(', ')}`);
+          }
+          ok('effacement des données', '0 clé restante après confirmation');
+        });
+
+        document.getElementById('result').textContent = out.join('\n');
+      })().catch((error) => {
+        document.getElementById('result').textContent =
+          'FAIL parcours — ' + (error && error.stack ? error.stack : error);
+      });
+    </script>
+  </body>
+</html>

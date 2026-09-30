@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="fr">
+  <head><meta charset="utf-8" /><title>sonde : effacement des données locales</title></head>
+  <body>
+    <iframe id="f" style="width:100%;height:500px;border:1px solid #333"></iframe>
+    <pre id="result">en attente…</pre>
+    <script>
+      const lines = [];
+      const keys = () =>
+        ['nexora_cart', 'nexora_wishlist', 'nexora_promo', 'nexora_order'].filter(
+          (k) => localStorage.getItem(k) !== null,
+        );
+      const done = () => {
+        document.getElementById('result').textContent = lines.join('\n') || 'aucun résultat';
+      };
+      const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+      const setInput = (el, v) => {
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+        setter.call(el, v);
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+      };
+      const findButton = (root, text) =>
+        [...root.querySelectorAll('button')].find((b) => b.textContent.trim().includes(text));
+      const byText = (root, sel, text) =>
+        [...root.querySelectorAll(sel)].find((e) => e.textContent.trim().includes(text));
+
+      // 1. Jeu d'essai : on remplit le stockage local AVANT de charger l'application.
+      localStorage.clear();
+      localStorage.setItem('nexora_cart', JSON.stringify([{ product: { id: 'probe' }, quantity: 2 }]));
+      localStorage.setItem('nexora_wishlist', JSON.stringify(['a', 'b']));
+      localStorage.setItem('nexora_promo', JSON.stringify('CYBERWEEK15'));
+      lines.push('avant effacement : ' + keys().join(', '));
+
+      const frame = document.getElementById('f');
+      frame.addEventListener('load', async () => {
+        try {
+          await frame.contentWindow.document.fonts.ready;
+          const d = frame.contentDocument;
+          await wait(400);
+
+          // 2. Connexion (la carte « Données locales » n'apparaît qu'une fois connecté).
+          setInput(d.querySelector('input[type="email"]'), 'client@nexora.demo');
+          setInput(d.querySelector('input[type="password"]'), 'demo1234');
+          d.querySelector('form').dispatchEvent(
+            new Event('submit', { bubbles: true, cancelable: true }),
+          );
+          await wait(600);
+
+          const zone = byText(d, '.danger-zone', 'Données locales');
+          lines.push('carte données locales présente = ' + Boolean(zone));
+          if (!zone) {
+            done();
+            return;
+          }
+
+          // 3. Effacement en deux temps (demande puis confirmation).
+          const trigger = findButton(zone, 'Effacer toutes mes données locales');
+          lines.push('bouton effacement présent = ' + Boolean(trigger));
+          trigger.click();
+          await wait(400);
+          const confirm = findButton(d, 'Confirmer l');
+          lines.push('confirmation affichée = ' + Boolean(confirm));
+          confirm.click();
+          await wait(800);
+
+          lines.push('après effacement : ' + (keys().join(', ') || '(aucune clé)'));
+          lines.push('total de clés restantes = ' + keys().length);
+        } catch (e) {
+          lines.push('ERREUR ' + e.message);
+        }
+        done();
+      });
+      setTimeout(() => {
+        if (lines.length < 4) {
+          lines.push('TIMEOUT');
+          done();
+        }
+      }, 9000);
+      frame.src = '/compte';
+    </script>
+  </body>
+</html>

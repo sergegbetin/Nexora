@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <title>NEXORA — sonde de mise en page</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        background: #080810;
+        color: #f0f0f8;
+        font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      #result {
+        margin: 0;
+        padding: 10px;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      iframe {
+        display: block;
+        border: 0;
+        margin-top: 10px;
+      }
+    </style>
+  </head>
+  <body>
+    <pre id="result">PENDING</pre>
+    <script>
+      /*
+       * Sonde de mise en page : charge chaque route dans une iframe de largeur
+       * exacte (responsive réel — les media queries réagissent à la fenêtre de
+       * l'iframe) et mesure :
+       *   · overflow horizontal, éléments hors écran
+       *   · images cassées / sans alt, polices, <h1>, title
+       *   · contrastes texte/fond (WCAG AA)
+       *   · ressources en échec (404/500)
+       * Sortie : JSON dans <pre id="result">.
+       */
+      (async () => {
+        const params = new URLSearchParams(location.search);
+        const width = Number(params.get('width')) || 1440;
+        const routes = (params.get('routes') || '/').split(',').filter(Boolean);
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+        const parseColor = (value) => {
+          const v = String(value || '').trim();
+          const hex = /^#([0-9a-f]{3,8})$/i.exec(v);
+          if (hex) {
+            let h = hex[1];
+            if (h.length === 3 || h.length === 4) h = h.split('').map((c) => c + c).join('');
+            if (h.length !== 6 && h.length !== 8) return null;
+            return {
+              r: parseInt(h.slice(0, 2), 16),
+              g: parseInt(h.slice(2, 4), 16),
+              b: parseInt(h.slice(4, 6), 16),
+              a: h.length === 8 ? parseInt(h.slice(6, 8), 16) / 255 : 1,
+            };
+          }
+          const rgba = /^rgba?\(([^)]+)\)$/i.exec(v);
+          if (!rgba) return null;
+          const p = rgba[1].split(',').map((s) => parseFloat(s.trim()));
+          if (p.length < 3 || p.some((n) => Number.isNaN(n))) return null;
+          return { r: p[0], g: p[1], b: p[2], a: p.length > 3 ? p[3] : 1 };
+        };
+        const lin = (c) => {
+          const v = c / 255;
+          return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+        };
+        const luminance = (c) => 0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b);
+        const contrast = (a, b) => {
+          const l1 = luminance(a);
+          const l2 = luminance(b);
+          return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
+        };
+
+        const backgroundOf = (el, win) => {
+          let node = el;
+          while (node && node.nodeType === 1) {
+            const parsed = parseColor(win.getComputedStyle(node).backgroundColor);
+            if (parsed && parsed.a >= 0.9) return parsed;
+            node = node.parentElement;
+          }
+          return { r: 8, g: 8, b: 16, a: 1 };
+        };
+
+        const toHex = (c) =>
+          '#' +
+          [c.r, c.g, c.b]
+            .map((v) => Math.round(v).toString(16).padStart(2, '0'))
+            .join('');
+
+        const label = (el) => {
+          const cls =
+            typeof el.className === 'string' && el.className.trim()
+              ? '.' + el.className.trim().split(/\s+/).slice(0, 2).join('.')
+              : '';
+          return el.tagName.toLowerCase() + cls;
+        };
+
+        const hasDirectText = (el) =>
+          Array.from(el.childNodes).some(
+            (node) => node.nodeType === 3 && node.textContent.trim().length > 1,
+          );
+
+        const insideScrollableX = (el, win) => {
+          let node = el.parentElement;
+          while (node && node.nodeType === 1) {
+            const overflowX = win.getComputedStyle(node).overflowX;
+            if (overflowX === 'auto' || overflowX === 'scroll') return true;
+            node = node.parentElement;
+          }
+          return false;
+        };
+
+        const waitForImages = (doc, timeout) =>
+          Promise.race([
+            Promise.all(
+              Array.from(doc.images).map((img) =>
+                img.complete
+                  ? Promise.resolve()
+                  : new Promise((resolve) => {
+                      img.addEventListener('load', resolve, { once: true });
+                      img.addEventListener('error', resolve, { once: true });
+                      setTimeout(resolve, timeout);
+                    }),
+              ),
+            ),
+            sleep(timeout),
+          ]);
+
+        /**
+         * Le HTML pré-rendu est visible immédiatement, mais React ne reprend la
+         * main qu'après le téléchargement/exécution du bundle (~3 s à froid).
+         * Sans cet attente, les clics de la sonde tombent dans le vide.
+         */
+        const reactMounted = async (frame, timeout = 9000) => {
+          const started = Date.now();
+          while (Date.now() - started < timeout) {
+            try {
+              const root = frame.contentDocument.getElementById('root');
+              if (
+                root &&
+                Array.from(root.querySelectorAll('*')).some((el) =>
+                  Object.keys(el).some((k) => k.startsWith('__react')),
+                )
+              ) {
+                return true;
+              }
+            } catch {
+              /* document en cours de navigation */
+            }
+            await sleep(150);
+          }
+          return false;
+        };
+
+        const openFrame = async (route, w) => {
+          const frame = document.createElement('iframe');
+          frame.style.width = w + 'px';
+          frame.style.height = '980px';
+          document.body.appendChild(frame);
+          await new Promise((resolve) => {
+            frame.addEventListener('load', resolve, { once: true });
+            frame.src = route;
+          });
+          await reactMounted(frame);
+          await sleep(600);
+          await waitForImages(frame.contentDocument, 2500);
+          await sleep(250);
+          return frame;
+        };
+
+        // Remplit un champ contrôlé par React (setter natif + évènement input).
+        const setValue = (win, el, value) => {
+          const proto =
+            el.tagName === 'TEXTAREA' ? win.HTMLTextAreaElement.prototype : win.HTMLInputElement.prototype;
+          Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, value);
+          el.dispatchEvent(new win.Event('input', { bubbles: true }));
+          el.dispatchEvent(new win.Event('change', { bubbles: true }));
+        };
+
+        // Amorce le panier comme le ferait un client (1 article depuis la boutique).
+        const seedCart = async () => {
+          const frame = await openFrame('/boutique', width);
+          const doc = frame.contentDocument;
+          const button = Array.from(doc.querySelectorAll('button')).find((b) =>
+            /ajouter au panier/i.test(b.textContent || ''),
+          );
+          if (button) {
+            button.click();
+            await sleep(900);
+          }
+          const seeded = Boolean(frame.contentWindow.localStorage.getItem('nexora_cart'));
+          frame.remove();
+          return seeded;
+        };
+
+        const results = [];
+        const cartRoutes = new Set(['/panier', '/checkout', '/confirmation']);
+        let cartSeeded = false;
+
+        for (const route of routes) {
+          const problems = [];
+          const info = [];
+          if (cartRoutes.has(route) && !cartSeeded) cartSeeded = await seedCart();
+
+          const frame = await openFrame(route, width);
+          const win = frame.contentWindow;
+          const doc = win.document;
+          const inner = win.innerWidth;
+
+          if (doc.documentElement.scrollWidth > inner + 1) {
+            problems.push(
+              `overflow horizontal : ${doc.documentElement.scrollWidth}px > ${inner}px`,
+            );
+          }
+
+          // Images cassées / absentes d'attribut alt.
+          const broken = [];
+          for (const img of Array.from(doc.images)) {
+            const src = img.getAttribute('src') || '';
+            if (!src || src.startsWith('data:')) continue;
+            if (img.complete && img.naturalWidth === 0) broken.push(src.split('/').pop());
+          }
+          if (broken.length) problems.push(`image(s) cassée(s) : ${[...new Set(broken)].slice(0, 5).join(', ')}`);
+          const noAlt = Array.from(doc.images).filter(
+            (img) => img.getAttribute('src') && !img.hasAttribute('alt'),
+          );
+          if (noAlt.length) problems.push(`${noAlt.length} image(s) sans attribut alt`);
+
+          // Structure / SEO après rendu client.
+          const h1 = doc.querySelectorAll('h1').length;
+          if (h1 !== 1) problems.push(`${h1} balises <h1> (attendu 1)`);
+          if (!doc.title || doc.title.trim().length < 10) problems.push('title absent après rendu client');
+          if (doc.documentElement.lang !== 'fr') problems.push('attribut lang absent (attendu "fr")');
+
+          // Polices réellement disponibles.
+          if (!doc.fonts || doc.fonts.status !== 'loaded') {
+            problems.push('polices non chargées (document.fonts.status)');
+          } else if (!doc.fonts.check('700 32px "Space Grotesk"')) {
+            problems.push('Space Grotesk indisponible');
+          } else if (!doc.fonts.check('400 16px "Inter"')) {
+            problems.push('Inter indisponible');
+          }
+
+          // Contrastes (WCAG AA : 4,5 texte normal / 3 texte large).
+          // Regroupés par couple (couleur du texte, fond) : chaque couple est un
+          // jeton de design à corriger, pas un incident isolé.
+          const contrastFails = [];
+          const candidates = Array.from(doc.querySelectorAll('body *')).filter(
+            (el) => hasDirectText(el) && !el.hasAttribute('hidden'),
+          );
+          for (const el of candidates) {
+            const style = win.getComputedStyle(el);
+            if (style.visibility === 'hidden' || style.opacity === '0') continue;
+            if (style.webkitBackgroundClip === 'text' || style.backgroundClip === 'text') continue;
+            const color = parseColor(style.color);
+            if (!color || color.a < 0.9) continue;
+            const size = parseFloat(style.fontSize) || 16;
+            const weight = parseInt(style.fontWeight, 10) || 400;
+            const large = size >= 24 || (size >= 18.66 && weight >= 700);
+            const need = large ? 3 : 4.5;
+            const bg = backgroundOf(el, win);
+            const ratio = contrast(color, bg);
+            if (ratio < need) {
+              contrastFails.push({
+                ratio: Math.round(ratio * 100) / 100,
+                need,
+                key: `${toHex(color)} sur ${toHex(bg)} (seuil ${need})`,
+                sample: `${label(el)} « ${(el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 42)} »`,
+              });
+            }
+          }
+          const groups = new Map();
+          for (const failure of contrastFails) {
+            const group = groups.get(failure.key) || { ...failure, count: 0 };
+            group.count += 1;
+            if (failure.ratio < group.ratio) group.ratio = failure.ratio;
+            if (failure.ratio === group.ratio) group.sample = failure.sample;
+            groups.set(failure.key, group);
+          }
+          const ranked = [...groups.values()].sort((a, b) => a.ratio - b.ratio);
+          for (const group of ranked.slice(0, 6)) {
+            problems.push(`contraste ${group.ratio}:1 — ${group.key} ×${group.count} (${group.sample})`);
+          }
+          if (ranked.length > 6) {
+            info.push(`${ranked.length - 6} autre(s) couple(s) de couleurs sous le seuil WCAG`);
+          }
+          if (contrastFails.length) info.push(`${contrastFails.length} textes concernés au total`);
+
+          // Éléments visibles sortant du cadre.
+          const offenders = [];
+          for (const el of Array.from(doc.querySelectorAll('body *'))) {
+            const rect = el.getBoundingClientRect();
+            if (rect.width < 2 || rect.height < 2) continue;
+            const style = win.getComputedStyle(el);
+            if (style.position === 'fixed') continue;
+            if (style.visibility === 'hidden' || style.opacity === '0') continue;
+            if (el.closest('[aria-hidden="true"], [hidden]')) continue;
+            if (insideScrollableX(el, win)) continue;
+            if (rect.right > inner + 2 || rect.left < -2) {
+              offenders.push(
+                `${label(el)} [${Math.round(rect.left)}→${Math.round(rect.right)}]`,
+              );
+            }
+            if (offenders.length > 6) break;
+          }
+          if (offenders.length) {
+            problems.push(`élément(s) hors écran : ${offenders.slice(0, 4).join(', ')}`);
+          }
+
+          // Ressources en échec (404/500) sur cette page.
+          const failedResources = win.performance
+            .getEntriesByType('resource')
+            .filter((entry) => entry.responseStatus && entry.responseStatus >= 400)
+            .map((entry) => `${entry.responseStatus} ${entry.name.split('/').pop()}`);
+          if (failedResources.length) {
+            problems.push(`ressource(s) en échec : ${failedResources.slice(0, 4).join(', ')}`);
+          }
+
+          results.push({ route, problems, info });
+          frame.remove();
+          await sleep(150);
+        }
+
+        document.getElementById('result').textContent = JSON.stringify({ width, results });
+      })().catch((error) => {
+        document.getElementById('result').textContent = JSON.stringify({
+          error: String(error && error.stack ? error.stack : error),
+        });
+      });
+    </script>
+  </body>
+</html>

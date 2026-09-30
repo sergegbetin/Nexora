@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <title>NEXORA — test de montage React</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        background: #080810;
+        color: #eee;
+        font: 12px/1.4 ui-monospace, monospace;
+      }
+      pre {
+        padding: 10px;
+        white-space: pre-wrap;
+      }
+      iframe {
+        width: 1200px;
+        height: 700px;
+        border: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <pre id="result">PENDING</pre>
+    <iframe id="app" title="a"></iframe>
+    <script>
+      (async () => {
+        const out = [];
+        const frame = document.getElementById('app');
+        const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+        const win = () => frame.contentWindow;
+        const doc = () => frame.contentDocument;
+        const path = () => win().location.pathname;
+        const reactKeys = (el) =>
+          el ? Object.keys(el).filter((k) => k.startsWith('__react')).length : -1;
+
+        const wait = async (fn, ms = 6000) => {
+          const start = Date.now();
+          while (Date.now() - start < ms) {
+            try {
+              const v = fn();
+              if (v) return v;
+            } catch {}
+            await sleep(100);
+          }
+          return null;
+        };
+
+        const check = async (route) => {
+          frame.src = route;
+          await wait(() => doc().querySelector('h1') && doc().getElementById('root'), 8000);
+          const started = Date.now();
+          // On attend que React "possède" réellement les nœuds (montage effectif).
+          const owned = await wait(() => {
+            const root = doc().getElementById('root');
+            if (!root) return null;
+            const node = Array.from(root.querySelectorAll('*')).find(
+              (el) => Object.keys(el).some((k) => k.startsWith('__react')),
+            );
+            return node || null;
+          }, 6000);
+          const elapsed = Date.now() - started;
+          out.push(
+            `${route} : montage React = ${owned ? 'OUI' : 'NON'} (${elapsed} ms) · clés #root = ${reactKeys(
+              doc().getElementById('root'),
+            )} · clés <h1> = ${reactKeys(doc().querySelector('h1'))}`,
+          );
+          if (owned) {
+            // Test fonctionnel réel : le panier doit réagir au clic.
+            const add = Array.from(doc().querySelectorAll('button')).find((b) =>
+              /Ajouter au panier/i.test(b.textContent || ''),
+            );
+            if (add) {
+              add.click();
+              await sleep(500);
+              const cart = win().localStorage.getItem('nexora_cart');
+              out.push(`   ajout au panier → localStorage = ${cart ? 'OK' : 'VIDE'}`);
+            } else {
+              out.push("   bouton « Ajouter au panier » absent sur cette route");
+            }
+          }
+          return Boolean(owned);
+        };
+
+        const home = await check('/');
+        const shop = await check('/boutique');
+        out.push('');
+        out.push(home && shop ? 'VERDICT : front statique + interactif partout' : 'VERDICT : montage incomplet');
+
+        document.getElementById('result').textContent = out.join('\n');
+      })().catch((e) => {
+        document.getElementById('result').textContent = 'ERREUR ' + (e.stack || e);
+      });
+    </script>
+  </body>
+</html>
